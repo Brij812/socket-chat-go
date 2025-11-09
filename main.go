@@ -167,6 +167,36 @@ func handleConn(hub *Hub, conn net.Conn) {
 		case upper == "PING":
 			fmt.Fprintln(conn, "PONG")
 
+		case strings.HasPrefix(upper, "DM "):
+			// Split into "DM", "<target>", "<text>"
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) < 3 {
+				fmt.Fprintln(conn, "ERR usage: DM <username> <text>")
+				continue
+			}
+			targetName := strings.TrimSpace(parts[1])
+			messageText := strings.TrimSpace(parts[2])
+
+			if targetName == "" || messageText == "" {
+				fmt.Fprintln(conn, "ERR usage: DM <username> <text>")
+				continue
+			}
+
+			hub.mu.RLock()
+			target, ok := hub.users[targetName]
+			hub.mu.RUnlock()
+
+			if !ok {
+				fmt.Fprintln(conn, "ERR user-not-found")
+				continue
+			}
+
+			// Send the DM only to the target
+			target.out <- fmt.Sprintf("DM %s %s", client.username, messageText)
+
+			// (Optional) echo confirmation back to sender
+			fmt.Fprintf(conn, "DM to %s: %s\n", targetName, messageText)
+
 		default:
 			// unknown command
 			fmt.Fprintln(conn, "ERR unknown-cmd")
