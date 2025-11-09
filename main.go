@@ -196,19 +196,25 @@ func handleConn(hub *Hub, conn net.Conn) {
 			}
 			targetName := strings.TrimSpace(parts[1])
 			messageText := strings.TrimSpace(parts[2])
+
 			if targetName == "" || messageText == "" {
 				writeSafe(conn, "ERR usage: DM <username> <text>")
 				continue
 			}
+
 			hub.mu.RLock()
 			target, ok := hub.users[targetName]
 			hub.mu.RUnlock()
+
 			if !ok {
 				writeSafe(conn, "ERR user-not-found")
 				continue
 			}
+
+			// Send the DM only to the target
 			target.out <- fmt.Sprintf("DM %s %s", client.username, messageText)
-			writeSafe(conn, fmt.Sprintf("DM to %s: %s", targetName, messageText))
+
+			// Log the DM server-side but don't show it to the sender
 			log.Printf("[DM] from=%s to=%s text=%q", client.username, targetName, messageText)
 
 		default:
