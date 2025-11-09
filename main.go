@@ -157,6 +157,16 @@ func handleConn(hub *Hub, conn net.Conn) {
 			msg := fmt.Sprintf("MSG %s %s", client.username, text)
 			hub.broadcast(client.username, msg)
 
+		case upper == "WHO":
+			hub.mu.RLock()
+			for _, c := range hub.users {
+				fmt.Fprintf(conn, "USER %s\n", c.username)
+			}
+			hub.mu.RUnlock()
+
+		case upper == "PING":
+			fmt.Fprintln(conn, "PONG")
+
 		default:
 			// unknown command
 			fmt.Fprintln(conn, "ERR unknown-cmd")
