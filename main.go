@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +30,6 @@ func NewHub() *Hub {
 	return &Hub{users: make(map[string]*Client)}
 }
 
-// addUser registers a user if username free. returns error if taken.
 func (h *Hub) addUser(c *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -40,33 +40,28 @@ func (h *Hub) addUser(c *Client) error {
 	return nil
 }
 
-// removeUser removes a user by username
 func (h *Hub) removeUser(username string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.users, username)
 }
 
-// broadcast sends a line to all connected clients except optional sender
 func (h *Hub) broadcast(sender, line string) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, c := range h.users {
 		if sender != "" && c.username == sender {
-			continue // skip sender so they don't see their own message
+			continue
 		}
 		select {
 		case c.out <- line:
 		default:
-			// drop if client's writer is slow
 		}
 	}
 }
 
 func main() {
-	var (
-		flagPort = flag.Int("port", 4000, "Port to listen on")
-	)
+	var flagPort = flag.Int("port", 4000, "Port to listen on")
 	flag.Parse()
 
 	port := *flagPort
@@ -86,6 +81,16 @@ func main() {
 
 	hub := NewHub()
 
+	// Graceful shutdown
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		log.Println("[SHUTDOWN] server shutting down gracefully...")
+		ln.Close()
+		os.Exit(0)
+	}()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -98,23 +103,23 @@ func main() {
 
 func handleConn(hub *Hub, conn net.Conn) {
 	defer conn.Close()
+	log.Printf("[CONNECT] new connection from %s", conn.RemoteAddr())
 
 	reader := bufio.NewScanner(conn)
 	buf := make([]byte, 0, 64*1024)
 	reader.Buffer(buf, 64*1024)
 
-	// 1) LOGIN flow
 	if !reader.Scan() {
 		return
 	}
 	line := cleanLine(reader.Text())
 	if !strings.HasPrefix(strings.ToUpper(line), "LOGIN ") {
-		fmt.Fprintln(conn, "ERR expected 'LOGIN <username>'")
+		writeSafe(conn, "ERR expected 'LOGIN <username>'")
 		return
 	}
 	username := strings.TrimSpace(line[len("LOGIN "):])
 	if username == "" || strings.Contains(username, " ") {
-		fmt.Fprintln(conn, "ERR invalid-username")
+		writeSafe(conn, "ERR invalid-username")
 		return
 	}
 
@@ -124,19 +129,21 @@ func handleConn(hub *Hub, conn net.Conn) {
 		out:      make(chan string, 32),
 	}
 	if err := hub.addUser(client); err != nil {
-		fmt.Fprintln(conn, "ERR username-taken")
+		writeSafe(conn, "ERR username-taken")
 		return
 	}
+	log.Printf("[LOGIN] user=%s", username)
+
 	defer func() {
 		hub.removeUser(client.username)
 		hub.broadcast("", fmt.Sprintf("INFO %s disconnected", client.username))
+		log.Printf("[DISCONNECT] %s disconnected", client.username)
 	}()
 
-	fmt.Fprintln(conn, "OK")
+	writeSafe(conn, "OK")
 	done := make(chan struct{})
 	go clientWriter(client, done)
 
-	// 3) Idle timeout setup — disconnect after 60s of inactivity
 	idleTimer := time.NewTimer(60 * time.Second)
 	resetTimer := func(d time.Duration) {
 		if !idleTimer.Stop() {
@@ -149,11 +156,10 @@ func handleConn(hub *Hub, conn net.Conn) {
 	}
 	go func() {
 		<-idleTimer.C
-		fmt.Fprintln(conn, "INFO disconnected due to inactivity")
+		writeSafe(conn, "INFO disconnected due to inactivity")
 		conn.Close()
 	}()
 
-	// 2) Read commands from this client
 	for reader.Scan() {
 		line := cleanLine(reader.Text())
 		if line == "" {
@@ -170,45 +176,43 @@ func handleConn(hub *Hub, conn net.Conn) {
 			}
 			msg := fmt.Sprintf("MSG %s %s", client.username, text)
 			hub.broadcast(client.username, msg)
+			log.Printf("[MSG] from=%s text=%q", client.username, text)
 
 		case upper == "WHO":
 			hub.mu.RLock()
 			for _, c := range hub.users {
-				fmt.Fprintf(conn, "USER %s\n", c.username)
+				writeSafe(conn, fmt.Sprintf("USER %s", c.username))
 			}
 			hub.mu.RUnlock()
 
 		case upper == "PING":
-			fmt.Fprintln(conn, "PONG")
+			writeSafe(conn, "PONG")
 
 		case strings.HasPrefix(upper, "DM "):
 			parts := strings.SplitN(line, " ", 3)
 			if len(parts) < 3 {
-				fmt.Fprintln(conn, "ERR usage: DM <username> <text>")
+				writeSafe(conn, "ERR usage: DM <username> <text>")
 				continue
 			}
 			targetName := strings.TrimSpace(parts[1])
 			messageText := strings.TrimSpace(parts[2])
-
 			if targetName == "" || messageText == "" {
-				fmt.Fprintln(conn, "ERR usage: DM <username> <text>")
+				writeSafe(conn, "ERR usage: DM <username> <text>")
 				continue
 			}
-
 			hub.mu.RLock()
 			target, ok := hub.users[targetName]
 			hub.mu.RUnlock()
-
 			if !ok {
-				fmt.Fprintln(conn, "ERR user-not-found")
+				writeSafe(conn, "ERR user-not-found")
 				continue
 			}
-
 			target.out <- fmt.Sprintf("DM %s %s", client.username, messageText)
-			fmt.Fprintf(conn, "DM to %s: %s\n", targetName, messageText)
+			writeSafe(conn, fmt.Sprintf("DM to %s: %s", targetName, messageText))
+			log.Printf("[DM] from=%s to=%s text=%q", client.username, targetName, messageText)
 
 		default:
-			fmt.Fprintln(conn, "ERR unknown-cmd")
+			writeSafe(conn, "ERR unknown-cmd")
 		}
 	}
 }
@@ -225,14 +229,22 @@ func clientWriter(c *Client, done chan struct{}) {
 				line += "\n"
 			}
 			if _, err := w.WriteString(line); err != nil {
+				log.Printf("[ERROR] write to %s failed: %v", c.username, err)
 				return
 			}
 			if err := w.Flush(); err != nil {
+				log.Printf("[ERROR] flush to %s failed: %v", c.username, err)
 				return
 			}
 		case <-done:
 			return
 		}
+	}
+}
+
+func writeSafe(conn net.Conn, msg string) {
+	if _, err := fmt.Fprintln(conn, msg); err != nil {
+		log.Printf("[ERROR] write failed to %v: %v", conn.RemoteAddr(), err)
 	}
 }
 
