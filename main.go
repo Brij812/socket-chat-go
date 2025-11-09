@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Client represents a connected user
@@ -99,7 +100,6 @@ func handleConn(hub *Hub, conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewScanner(conn)
-	// Raise the default token size to handle long messages (up to ~64KB)
 	buf := make([]byte, 0, 64*1024)
 	reader.Buffer(buf, 64*1024)
 
@@ -132,12 +132,26 @@ func handleConn(hub *Hub, conn net.Conn) {
 		hub.broadcast("", fmt.Sprintf("INFO %s disconnected", client.username))
 	}()
 
-	// Confirm login
 	fmt.Fprintln(conn, "OK")
-
-	// Start writer goroutine so broadcasts don't block reader
 	done := make(chan struct{})
 	go clientWriter(client, done)
+
+	// 3) Idle timeout setup — disconnect after 60s of inactivity
+	idleTimer := time.NewTimer(60 * time.Second)
+	resetTimer := func(d time.Duration) {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(d)
+	}
+	go func() {
+		<-idleTimer.C
+		fmt.Fprintln(conn, "INFO disconnected due to inactivity")
+		conn.Close()
+	}()
 
 	// 2) Read commands from this client
 	for reader.Scan() {
@@ -145,11 +159,11 @@ func handleConn(hub *Hub, conn net.Conn) {
 		if line == "" {
 			continue
 		}
-		upper := strings.ToUpper(line)
+		resetTimer(60 * time.Second)
 
+		upper := strings.ToUpper(line)
 		switch {
 		case strings.HasPrefix(upper, "MSG "):
-			// broadcast message
 			text := strings.TrimSpace(line[len("MSG "):])
 			if text == "" {
 				continue
@@ -168,7 +182,6 @@ func handleConn(hub *Hub, conn net.Conn) {
 			fmt.Fprintln(conn, "PONG")
 
 		case strings.HasPrefix(upper, "DM "):
-			// Split into "DM", "<target>", "<text>"
 			parts := strings.SplitN(line, " ", 3)
 			if len(parts) < 3 {
 				fmt.Fprintln(conn, "ERR usage: DM <username> <text>")
@@ -191,18 +204,13 @@ func handleConn(hub *Hub, conn net.Conn) {
 				continue
 			}
 
-			// Send the DM only to the target
 			target.out <- fmt.Sprintf("DM %s %s", client.username, messageText)
-
-			// (Optional) echo confirmation back to sender
 			fmt.Fprintf(conn, "DM to %s: %s\n", targetName, messageText)
 
 		default:
-			// unknown command
 			fmt.Fprintln(conn, "ERR unknown-cmd")
 		}
 	}
-	// On scanner error or EOF, return -> deferred cleanup runs
 }
 
 func clientWriter(c *Client, done chan struct{}) {
@@ -213,7 +221,6 @@ func clientWriter(c *Client, done chan struct{}) {
 			if !ok {
 				return
 			}
-			// Each broadcast already a full line; ensure newline
 			if !strings.HasSuffix(line, "\n") {
 				line += "\n"
 			}
@@ -229,12 +236,9 @@ func clientWriter(c *Client, done chan struct{}) {
 	}
 }
 
-// cleanLine normalizes whitespace: trims and collapses multiple spaces to singles around command tokens.
 func cleanLine(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.TrimSpace(s)
-	// Don't collapse spaces inside message text; only normalize leading command spacing
-	// Split once by first space to separate command and rest
 	if s == "" {
 		return ""
 	}
