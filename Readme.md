@@ -19,6 +19,7 @@ The project demonstrates clean concurrency patterns, robust user management, and
 9. Running Locally  
 10. Example Interaction  
 11. Logging     
+12. Demo Video 
 
 ---
 
@@ -193,6 +194,14 @@ MSG hello Naman!
 All major actions are logged in the server terminal with structured context:
 - `[CONNECT]`, `[LOGIN]`, `[MSG]`, `[DM]`, `[DISCONNECT]`, `[ERROR]`  
 This helps debug or audit chat interactions easily.
+
+---
+
+## 12. Demo Video
+
+**Demo Recording:**  
+Watch the full demonstration of SocketChat-Go in action here:  
+[https://www.loom.com/share/658aed602c1448a4b8e3ec29be90c29a](https://www.loom.com/share/658aed602c1448a4b8e3ec29be90c29a)
 
 ---
 
